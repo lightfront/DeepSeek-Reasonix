@@ -852,6 +852,7 @@ export function applyIncoming(state: State, ev: IncomingEvent): State {
               `Session "${ev.name}" loaded with no messages (${sizeNote}). ` +
               `The file ~/.reasonix/sessions/${ev.name}.jsonl exists but couldn't be parsed — ` +
               `start a new chat or restore from .jsonl.bak if you have one.`,
+            id: nextErrorId(),
           },
         ],
       };
