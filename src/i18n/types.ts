@@ -926,6 +926,8 @@ export interface TranslationSchema {
     groupSystem: string;
     descEnter: string;
     descShiftEnter: string;
+    descCtrlEnter: string;
+    descCtrlJ: string;
     descCtrlU: string;
     descCtrlW: string;
     descCtrlP: string;
