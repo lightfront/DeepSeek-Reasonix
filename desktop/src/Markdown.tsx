@@ -204,6 +204,22 @@ function withFilePills(children: ReactNode): ReactNode {
   });
 }
 
+/**
+ * Convert bracket-style math delimiters to dollar-style so they survive
+ * the markdown parser (which would otherwise consume the backslash in `\[`
+ * as an escape). Handles both display math \[...\] → $$...$$ and inline
+ * math \(...\) → $...$.
+ */
+function normalizeMathDelimiters(source: string): string {
+  return source
+    // display math: \[ ... \] → $$ ... $$
+    .replace(/\\\[/g, "$$$$")
+    .replace(/\\\]/g, "$$$$")
+    // inline math: \( ... \) → $ ... $
+    .replace(/\\\(/g, "$$")
+    .replace(/\\\)/g, "$$");
+}
+
 export const Markdown = memo(function Markdown({ source }: { source: string }) {
   return (
     <div className="markdown">
@@ -233,7 +249,7 @@ export const Markdown = memo(function Markdown({ source }: { source: string }) {
           td: ({ children }) => <td>{withFilePills(children)}</td>,
         }}
       >
-        {source}
+        {normalizeMathDelimiters(source)}
       </ReactMarkdown>
     </div>
   );
