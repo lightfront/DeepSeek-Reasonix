@@ -164,6 +164,7 @@ type InMessage = { tabId?: string } & (
       editor?: string;
       webSearchEngine?:
         | "bing"
+        | "bing-intl"
         | "searxng"
         | "metaso"
         | "tavily"
@@ -228,6 +229,7 @@ interface SettingsEvent {
   editor?: string;
   webSearchEngine?:
     | "bing"
+    | "bing-intl"
     | "searxng"
     | "metaso"
     | "tavily"
