@@ -1,6 +1,13 @@
 // Package openai implements the OpenAI-compatible /chat/completions provider.
-// It self-registers under the "openai" kind, so DeepSeek, MiMo, and any other
-// OpenAI-compatible endpoint are just config instances rather than code.
+// It self-registers under the "openai" kind, so DeepSeek, MiMo, MiniMax-M3, and
+// any other OpenAI-compatible endpoint are just config instances rather than
+// code. Each instance picks the wire shape from its base URL:
+//   - api.deepseek.com → emits thinking.type=enabled (DeepSeek-flavor CoT) plus
+//     reasoning_effort as a depth hint.
+//   - api.minimaxi.com → emits thinking.type=adaptive|disabled (M3's binary
+//     knob) instead of reasoning_effort, since M3 has no level scale.
+//   - everything else (MiMo and other OpenAI-compatible gateways) uses the
+//     vanilla reasoning_effort scale (low/medium/high).
 package openai
 
 import (
@@ -10,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -38,8 +44,10 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	}
 	keyEnv, _ := cfg.Extra["api_key_env"].(string) // for actionable auth errors
 	effort, _ := cfg.Extra["effort"].(string)
-	deepseek := isDeepSeekBaseURL(cfg.BaseURL)
-	if deepseek {
+	deepseek := IsDeepSeek(cfg.BaseURL)
+	minimax := IsMiniMax(cfg.BaseURL)
+	switch {
+	case deepseek:
 		effort = strings.ToLower(strings.TrimSpace(effort))
 		switch effort {
 		case "", "off": // "off" is a retired level (disabled thinking); fall back to the default depth
@@ -48,7 +56,20 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		default:
 			return nil, fmt.Errorf("openai: provider %q uses DeepSeek thinking; effort must be high or max", name)
 		}
-	} else if effort != "" {
+	case minimax:
+		// M3's knob is binary. The config effort layer normalises user input
+		// to "adaptive", "disabled", or "" (== auto). We keep "high"/"max"
+		// (legacy DeepSeek) and "low"/"medium" (Anthropic) out — config-level
+		// NormalizeEffort remaps them to "adaptive" already, so anything
+		// reaching here is expected to be one of: "", "adaptive", "disabled".
+		effort = strings.ToLower(strings.TrimSpace(effort))
+		switch effort {
+		case "": // auto — leave empty so the wire emits thinking.type=adaptive
+		case "adaptive", "disabled":
+		default:
+			return nil, fmt.Errorf("openai: provider %q uses MiniMax thinking; effort must be adaptive or disabled", name)
+		}
+	case effort != "":
 		// Non-DeepSeek backends use OpenAI's reasoning_effort scale (low/medium/
 		// high); "max" is a DeepSeek-ism MiMo et al. reject with 400, so clamp it
 		// to the OpenAI ceiling and reject other values at boot, not at request time.
@@ -72,6 +93,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		baseURL:  strings.TrimRight(cfg.BaseURL, "/"),
 		model:    cfg.Model,
 		deepseek: deepseek,
+		minimax:  minimax,
 		effort:   effort,
 		http:     httpClient,
 	}, nil
@@ -95,19 +117,11 @@ type client struct {
 	model    string
 	http     *http.Client
 	deepseek bool
-	effort   string // reasoning_effort forwarded to thinking-capable models; "" = omit
+	minimax  bool   // true for api.minimaxi.com — emits MiniMax-M3's thinking knob instead of reasoning_effort
+	effort   string // reasoning_effort for OpenAI; thinking.type for MiniMax; "" = auto/provider default
 }
 
 func (c *client) Name() string { return c.name }
-
-func isDeepSeekBaseURL(baseURL string) bool {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Hostname())
-	return host == "api.deepseek.com" || strings.HasSuffix(host, ".deepseek.com")
-}
 
 // bufPool reuses byte buffers for JSON-marshalled request bodies. Each turn
 // allocates a buffer, marshals the request, and sends it — pooling avoids the
@@ -231,8 +245,21 @@ func (c *client) buildRequest(req provider.Request) chatRequest {
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: c.effort,
 	}
-	if c.deepseek {
+	switch {
+	case c.deepseek:
+		// DeepSeek's CoT is controlled by `thinking` (always on) plus
+		// `reasoning_effort` for depth. We never disable thinking for DeepSeek.
 		out.Thinking = &thinkingMode{Type: "enabled"}
+	case c.minimax:
+		// M3 uses a single `thinking.type` field with two valid values:
+		// "adaptive" (default, thinking on) and "disabled" (off). Reasoning
+		// depth is not a knob on M3, so reasoning_effort is omitted entirely.
+		t := c.effort
+		if t == "" {
+			t = "adaptive" // /effort auto == the M3 model default
+		}
+		out.Thinking = &thinkingMode{Type: t}
+		out.ReasoningEffort = ""
 	}
 	return out
 }
