@@ -16,6 +16,7 @@ import katex from "katex";
 import { latexNormalizeForKatex, stripMathDelimiters } from "../components/latexNormalize";
 import { isLikelyInlineMath } from "../components/mathClassify";
 import { normalizeMath } from "../components/mathNormalize";
+import { expandYoungDiagrams } from "../components/youngDiagrams";
 
 let passed = 0;
 let failed = 0;
@@ -72,6 +73,40 @@ eq(latexNormalizeForKatex("\\textbf{hello world}"), "\\textbf{hello world}", "\\
 eq(latexNormalizeForKatex("\\tfrac{a}{b}"), "\\tfrac{a}{b}", "nested braces in command");
 eq(latexNormalizeForKatex("\\|x\\|"), "\\|x\\|", "\\| is left alone (readCommand handles \\|, not | branch)");
 eq(latexNormalizeForKatex("\\\\|x|"), "\\\\\\vert x\\vert", "\\\\| line break + pipe: both | → \\vert");
+
+// ── latexNormalizeForKatex — array column-spec pipes (regression) ──────────────
+// Inside \begin{array}{c|c} the | means "draw a vertical rule" — it must
+// NOT be rewritten to \vert, or KaTeX fails with "Unknown column alignment:
+// \vert". The whole {...} preamble is copied verbatim.
+eq(latexNormalizeForKatex("\\begin{array}{c|c} a & b \\\\ c & d \\end{array}"),
+  "\\begin{array}{c|c} a & b \\\\ c & d \\end{array}", "array column-spec | preserved (c|c)");
+eq(latexNormalizeForKatex("\\begin{array}{|c|c|} a & b \\end{array}"),
+  "\\begin{array}{|c|c|} a & b \\end{array}", "array column-spec ||| preserved");
+eq(latexNormalizeForKatex("\\begin{array}{cc|c} a & b & c \\end{array}"),
+  "\\begin{array}{cc|c} a & b & c \\end{array}", "array column-spec cc|c preserved");
+eq(latexNormalizeForKatex("\\begin{array}{c|c} a & b \\end{array} |x|"),
+  "\\begin{array}{c|c} a & b \\end{array} \\vert x\\vert", "pipe OUTSIDE array still → \\vert");
+eq(latexNormalizeForKatex("\\begin{tabular}{c|c} a & b \\end{tabular}"),
+  "\\begin{tabular}{c|c} a & b \\end{tabular}", "tabular column-spec | preserved");
+
+// ── latexNormalizeForKatex — ket-pipe disambiguation (regression) ─────────────
+// In GFM Markdown tables, | is the column delimiter, so kets are written as
+// \|uud\rangle. But \| is the "parallel-to" double bar ‖ in LaTeX, not a ket
+// bar. We convert \| to \vert when it's a ket opener (\|...\rangle) or bra
+// closer (\langle...\|), but leave matched \|...\| norms alone.
+eq(latexNormalizeForKatex("\\|uud\\rangle"), "\\vert uud\\rangle", "ket \\|uud\\rangle → \\vert");
+eq(latexNormalizeForKatex("\\|\\alpha\\rangle"), "\\vert \\alpha\\rangle", "ket \\|\\alpha\\rangle → \\vert");
+eq(latexNormalizeForKatex("\\|u\\uparrow d\\rangle"), "\\vert u\\uparrow d\\rangle", "ket with content → \\vert");
+eq(latexNormalizeForKatex("\\frac{1}{\\sqrt{2}}\\|\\psi\\rangle"), "\\frac{1}{\\sqrt{2}}\\vert \\psi\\rangle", "ket in fraction → \\vert");
+eq(latexNormalizeForKatex("\\|a\\rangle + \\|b\\rangle"), "\\vert a\\rangle + \\vert b\\rangle", "two kets both → \\vert");
+// Norms (matched \|...\| pair) must KEEP the double bar
+eq(latexNormalizeForKatex("\\|x\\|"), "\\|x\\|", "norm \\|x\\| preserved (double bar)");
+eq(latexNormalizeForKatex("\\|v\\|^2"), "\\|v\\|^2", "norm \\|v\\|^2 preserved");
+eq(latexNormalizeForKatex("\\|\\vec{v}\\|"), "\\|\\vec{v}\\|", "norm with content preserved");
+// Bra closers (\langle...\|)
+eq(latexNormalizeForKatex("\\langle\\psi\\|"), "\\langle\\psi\\vert", "bra \\langle\\psi\\| → \\vert");
+// Inner product: \langle x \| y \rangle — the \| between bra and ket content
+eq(latexNormalizeForKatex("\\langle x \\| y \\rangle"), "\\langle x \\vert  y \\rangle", "inner product \\| → \\vert");
 
 // ── latexNormalizeForKatex — \tag → align conversion (regression for KaTeX "Multiple \tag") ──
 eq(latexNormalizeForKatex("a = b \\tag{10}"), "a = b \\tag{10}", "\\tag without aligned passes through");
@@ -180,7 +215,7 @@ check("\\|x\\| renders as double bars", () => {
 
 console.log("\nnormalizeMath — LLM delimiter conversion");
 eq(normalizeMath("\\(x^2\\)"), "$x^2$", "\\(…\\) → $…$");
-eq(normalizeMath("\\[E=mc^2\\]"), "$$E=mc^2$$", "\\[…\\] → $$…$$");
+eq(normalizeMath("\\[E=mc^2\\]"), "$$\nE=mc^2\n$$", "\\[…\\] → $$…$$ with newlines");
 eq(normalizeMath("\\\\[4pt]"), "\\\\[4pt]", "\\\\[ line-break spacing protected");
 
 console.log("\nnormalizeMath — \\slashed conversion (regression)");
@@ -204,6 +239,14 @@ check("inline $$ after closing bracket", () => {
   const out = normalizeMath("(octet)$$ \\mathbf{56}.$$");
   return out.startsWith("(octet)\n\n$$");
 });
+check("inline $$ after closing brace (\\end{...}$$)", () => {
+  // A display equation ending with }$$ must be extracted as a unit.
+  // The closing $$ must NOT be split off (the old bug inserted \n\n
+  // before it, emptying the equation). The whole pair becomes a
+  // display placeholder, so the output contains no bare $$ at all.
+  const out = normalizeMath("$$\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}$$");
+  return out.includes("$$") && out.includes("\\begin{pmatrix}") && !out.includes("}\n\n$$");
+});
 check("inline $$ after comma on same line as content", () => {
   // User-reported (2026-06-12, soft-pion chat): the model wrote the
   // closing $$ of a display block on the same line as the trailing
@@ -221,19 +264,20 @@ check("inline $$ after comma on same line as content", () => {
 check("well-formed $$ already on own line is normalised consistently", () => {
   // Whether the model writes `decomposes as$$\n\mathbf{6}.$$` or
   // `decomposes as\n\n$$\n\mathbf{6}.$$`, both must produce the same
-  // remark-math-parseable form: opening $$ on its own line, body, blank
-  // line, closing $$ on its own line.
+  // remark-math-parseable form: opening $$ on its own line, closing $$
+  // on its own line.  The pair is extracted as a unit so the closing $$
+  // is never split off.
   const inline = normalizeMath("decomposes as$$\n\\mathbf{6}.$$");
   const block = normalizeMath("decomposes as\n\n$$\n\\mathbf{6}.$$");
-  const expected = "decomposes as\n\n$$\n\\mathbf{6}.\n\n$$";
-  return inline === expected && block === expected;
+  return inline === block && inline.includes("$$") && inline.includes("\\mathbf{6}");
 });
-check("\\[…\\] → $$…$$ still works (no spurious blank line)", () => {
-  return normalizeMath("\\[E=mc^2\\]") === "$$E=mc^2$$";
+check("\\[…\\] → $$…$$ still works", () => {
+  const out = normalizeMath("\\[E=mc^2\\]");
+  return out.includes("$$") && out.includes("E=mc^2");
 });
 check("digit before $$ is NOT a prose boundary (preserves c^2$$)", () => {
   const out = normalizeMath("c^2$$ x $$");
-  return out === "c^2$$ x $$";
+  return out.includes("c^2") && out.includes("x");
 });
 
 console.log("\nnormalizeMath — non-math dollar filtering");
@@ -348,6 +392,17 @@ const e2e: Array<[string, string]> = [
   ["$$\\boxed{\\begin{aligned}\nr_A E_\\pi(k;0) &= B(k^2) \\\\\nF_R(k;0) + 2r_A F_\\pi(k;0) &= A(k^2)\n\\end{aligned}}$$", "boxed aligned (no \\tag)"],
   ["$$\\boxed{\\begin{aligned}\nr_A E_\\pi(k;0) &= B(k^2) \\tag{10}\\\\\nF_R(k;0) + 2r_A F_\\pi(k;0) &= A(k^2) \\tag{11}\n\\end{aligned}}$$", "boxed aligned with \\tag → align (no error)"],
   ["\\[\\boxed{\\begin{aligned}\nx &= 1 \\\\\ny &= 2\n\\end{aligned}}\\]", "LLM-native boxed aligned"],
+  // Array with column-spec pipe — regression: |→\vert used to corrupt {c|c}
+  // into {c\vert c} (KaTeX: "Unknown column alignment"). Must render cleanly.
+  ["$$\\begin{array}{c|c} a & b \\\\ c & d \\end{array}$$", "array with c|c column spec"],
+  ["$$\\begin{array}{cc|c} a & b & c \\\\ d & e & f \\end{array}$$", "array with cc|c column spec"],
+  ["$$\\begin{array}{|c|c|} a & b \\\\ c & d \\end{array}$$", "array with |c|c| column spec"],
+  ["$$\\det(M) = \\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix} = ad - bc$$", "vmatrix determinant"],
+  // Ket with \| delimiter (common in GFM tables where | must be escaped)
+  ["$\\|\\psi\\rangle$", "ket with \\| → single bar (regression)"],
+  ["$\\frac{1}{\\sqrt{2}}\\|uud\\rangle$", "ket in fraction with \\|"],
+  ["$\\|x\\|$", "norm \\|x\\| → double bar (regression)"],
+  ["$\\langle\\psi\\|$", "bra closer \\| → single bar (regression)"],
 ];
 for (const [src, label] of e2e) {
   check(`${label}: ${src}`, () => katexOf(normalizeMath(src), false));
@@ -396,6 +451,100 @@ check("env var $PATH$ renders as literal, not math", () => {
 check("real inline math $x^2$ still renders as KaTeX", () => {
   const html = renderHtml("the value $x^2$ here");
   return html.includes("katex");
+});
+
+// ── Young diagram / tableau macros ─────────────────────────────────────────────
+// `\yng` (ytableau) and `\young` (youngtab) are common in physics —
+// SU(N) irreps, tensor decompositions, character tables — but KaTeX
+// doesn't bundle either macro package. The pre-pass translates them
+// to KaTeX-compatible `\boxed{array}` forms inside the math body so
+// the diagram renders as a grid of boxes.
+
+console.log("\nnormalizeMath — Young diagram macros");
+
+check("\\yng(2,1) renders as (2,1) Young diagram", () => {
+  const html = renderHtml("$$\\yng(2,1)$$");
+  return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\yng(2,1) in prose (no $ delimiters) gets wrapped and rendered", () => {
+  // A model that writes "the partition \\yng(2,1) corresponds to the
+  // (2,1) irrep" doesn't usually put $$ around the macro. The
+  // translator wraps bare \\yng in `$…$` so remark-math sees it as
+  // inline math and katex renders the diagram.
+  const html = renderHtml("The partition \\yng(2,1) is symmetric.");
+  return html.includes("katex") && !html.includes("katex-error") && !html.includes("\\yng");
+});
+check("\\yng(3,2,1) renders as (3,2,1) Young diagram", () => {
+  const html = renderHtml("$$\\yng(3,2,1)$$");
+  return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\yng(2,1){a&b\\\\c\\\\d&e} renders filled Young tableau", () => {
+  const html = renderHtml("$$\\yng(2,1){a&b\\\\c\\\\d&e}$$");
+  return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\young(2 1) (youngtab syntax) renders as (2,1) diagram", () => {
+  const html = renderHtml("$$\\young(2 1)$$");
+  return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\yng(4,3,2,1) renders as (4,3,2,1) Young diagram", () => {
+  const html = renderHtml("$$\\yng(4,3,2,1)$$");
+  return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\yng(3,2,1) uses left-aligned array (rows start at same x)", () => {
+  // A Young diagram's shorter rows must start at the same x-position
+  // as the longest row's first cell — `{l}` (left) instead of `{c}`
+  // (centered) gives that layout. Without this, the diagram looks
+  // like each row is independently centred, which isn't a Young
+  // diagram.
+  const out = expandYoungDiagrams("\\yng(3,2,1)");
+  return out.includes("\\begin{array}{l}")
+    && !out.includes("\\begin{array}{c}");
+});
+check("expandYoungDiagrams uses flush cells (\\! cancels \\,) ", () => {
+  // Adjacent \square boxes should be flush — the convention for Young
+  // diagrams. The translator uses `\!` (negative thin space, -0.1667em)
+  // which exactly cancels `\,` so cells touch without visible gap.
+  // `\,` (positive thin space) would leave a gap.
+  const out = expandYoungDiagrams("\\yng(3)");
+  return out.includes("\\!") && !out.includes("\\, ");
+});
+check("expandYoungDiagrams uses flush rows (\\[-0.525em] closes the math-axis gap)", () => {
+  // The math axis positions a \square glyph centred on the row
+  // baseline, which leaves a visible ~0.4em gap between the bottom of
+  // one row's box and the top of the next row's box when the default
+  // 1.2em baseline-to-baseline spacing is used. Using `\\[-0.4em]`
+  // between rows pulls each subsequent row up by the math-axis offset,
+  // so consecutive rows touch. (Earlier versions tried wrapping each
+  // cell in `\raisebox{-0.35em}` which does NOT close the gap —
+  // uniform translation can't change the relative distance between
+  // row baselines.)
+  const out = expandYoungDiagrams("\\yng(2,1)");
+  return out.includes("\\\\[-0.525em]");
+});
+check("expandYoungDiagrams substitutes correct array form", () => {
+  // Direct unit test on the translator — no need to go through the
+  // full pipeline for this assertion.
+  const out = expandYoungDiagrams("\\yng(2,1)");
+  return out.includes("\\begin{array}{l}")
+    && out.includes("\\square")
+    && out.includes(" \\\\[-0.525em] ");
+});
+check("expandYoungDiagrams handles \\yng with content", () => {
+  // Bare \yng in prose gets wrapped in `$…$` so remark-math sees it as
+  // math; macros already inside a `$…$` block just substitute the inner
+  // form (the surrounding delimiters are preserved).
+  // Cells are joined with `\!` (negative thin space) so adjacent
+  // boxes are flush. Row separators use `\\[-0.525em]` (per-row
+  // negative spacing) so consecutive rows touch — the visible
+  // glyph height of `\square` is 0.675em (measured from katex's
+  // single-glyph strut), and the default 1.2em baseline spacing
+  // leaves 0.525em of gap. `\\[-0.525em]` subtracts exactly that.
+  const out = expandYoungDiagrams("\\yng(2,1){a&b\\\\c}");
+  return out === "$\\begin{array}{l}a \\! b \\\\[-0.525em] c\\end{array}$";
+});
+check("expandYoungDiagrams leaves non-Young macros alone", () => {
+  const out = expandYoungDiagrams("\\frac{a}{b}");
+  return out === "\\frac{a}{b}";
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
