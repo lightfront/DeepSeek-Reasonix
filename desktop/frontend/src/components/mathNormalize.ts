@@ -60,30 +60,31 @@ function normalizeMathText(s: string): string {
     .replace(/\\\)/g, () => "$");
   r = r.replace(new RegExp(LB, "g"), "\\\\[");
 
-  // Step 3: repair inline $$. CommonMark requires a blank line before
-  // block math; without it remark-math parses the opening $$ as an
-  // empty math node and the formula leaks out as literal text.
+  // Step 3: extract $$…$$ display pairs into placeholders, ensuring
+  // both delimiters are paragraph-separated for remark-math (which
+  // requires $$ on its own line for block math). When the opening $$
+  // is glued to preceding prose, insert a blank line before it. The
+  // pair is extracted as a unit so the closing $$ is never split off.
+  // KaTeX-specific normalisation runs here so |→\vert (with \|
+  // protected) and \text{} escapes both apply to display math.
+  r = r.replace(/\$\$([\s\S]*?)\$\$/g, (_m, m, offset, full) => {
+    const prefix = offset > 0 && /[A-Za-z\)\]\>\.。！？,{}]/.test(full[offset - 1])
+      ? "\n\n"
+      : "";
+    return prefix + DM + latexNormalizeForKatex(m) + DM;
+  });
+
+  // Step 4: repair any remaining glued $$. After extracting well-formed
+  // $$…$$ pairs above, remaining $$ are orphaned openings (model forgot
+  // the closing $$) or stray double-dollars. Insert a blank line before
+  // them so remark-math recognises a block boundary.
   // Digits are excluded so `c^2$$` inside a formula is left alone.
-  // Comma is included so `…D(q^2),$$` (closing $$ on the same line as
-  // the trailing content) is repaired: micromark-extension-math only
-  // recognises a closing $$ fence at the start of a new line, so
-  // without this repair it consumes the rest of the document as math
-  // and katex fails on the stray $ in the next paragraph. Closing
-  // braces } and { are included too — a model that writes
-  // `\end{array}$$` or `\frac{a}{b}$$` on one line has the same
-  // micromark-fence problem, and these are the most common ends of
-  // LaTeX math content.
   r = r.replace(/([A-Za-z\)\]\>\.。！？,{}])\$\$/g, (_m, prev) => prev + "\n\n$$");
 
   // Orphan opening $$ (model forgot the closing $$) is left alone:
   // converting it to a lone $ would interact badly with the $…$
   // matcher below and wrap whole prose paragraphs in math spans. The
   // right fix is upstream — a post-generation lint or stricter prompt.
-
-  // Step 4: $$…$$ → display placeholders. KaTeX-specific normalisation
-  // runs here so |→\vert (with \| protected) and \text{} escapes both
-  // apply to display math.
-  r = r.replace(/\$\$([\s\S]*?)\$\$/g, (_m, m) => `${DM}${latexNormalizeForKatex(m)}${DM}`);
 
   // Step 5: $\cmd{...}$ pairs where the body may contain a stray $
   // (e.g. $\text{price is $5}$). Recognised first so the inner $ doesn't
@@ -104,9 +105,17 @@ function normalizeMathText(s: string): string {
   });
 
   // Step 7: restore standard $/$$ delimiters for remark-math to parse.
-  return r
-    .replace(new RegExp(DM, "g"), () => "$$")
-    .replace(new RegExp(IM, "g"), "$");
+  // Display math: the placeholders were inserted as DM...DM pairs.
+  // Restore them as $$\n...\n$$ so remark-math recognises block math
+  // (it requires $$ on its own line, not glued to content like $$x$$).
+  // The first DM in each pair is the opening $$, the second is closing.
+  let displayOpen = true;
+  r = r.replace(new RegExp(DM, "g"), () => {
+    const delim = displayOpen ? "$$\n" : "\n$$";
+    displayOpen = !displayOpen;
+    return delim;
+  });
+  return r.replace(new RegExp(IM, "g"), "$");
 }
 
 function protectMarkdownCode(s: string): { text: string; prefix: string; segments: string[] } {
