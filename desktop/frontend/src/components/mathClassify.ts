@@ -2,13 +2,13 @@ export function isLikelyInlineMath(math: string): boolean {
   if (!math || math !== math.trim() || math.includes("\n")) return false;
   if (math.includes("://") || math.includes("](")) return false;
   // Number followed by variable: implicit multiplication (2.5x, 3y^2)
-  if (/^\d+(?:\.\d+)?[A-Za-z]/.test(math)) return true;
+  if (/^\d+(?:\.\d+)?[A-Za-z](?:[A-Za-z0-9^_{}]*)?$/.test(math)) return true;
   // Number with LaTeX escape: 10\%, 5\cdot3
-  if (/\d.*\\/.test(math)) return true;
-  // Pure numbers (single/multi-digit, optional decimal/percentage) —
-  // currency in prose is typically written without the closing $ (costs
-  // $5), so the $N$ form almost always means math.
-  if (/^\d+(?:\.\d+)?%?$/.test(math)) return true;
+  if (/^\d+(?:\.\d+)?\\(?:%|[A-Za-z]+)(?:\{[^{}]*\})?(?:[A-Za-z0-9\\{}^_+\-*/=<>.()]*)$/.test(math)) return true;
+  // Pure numbers, decimals, and percentages are too often currency or
+  // prose percentages to parse as math. More explicit numeric math
+  // forms are accepted above/below: 2.5x, 10\%, +2, x=50%, etc.
+  if (/^\d+(?:\.\d+)?%?$/.test(math)) return false;
 
   // Unary plus/minus: +2, -x, +\alpha, - 3.14
   if (/^[+\-]\s*(?:\d+(?:\.\d+)?|[A-Za-z\\])/.test(math)) return true;

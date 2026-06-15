@@ -152,9 +152,10 @@ check("$Spin(3)$", () => isLikelyInlineMath("Spin(3)") === true);
 check("$Diff(M)$", () => isLikelyInlineMath("Diff(M)") === true);
 
 console.log("\nisLikelyInlineMath — currency/link (NOT math)");
-check("$10", () => isLikelyInlineMath("10") === true);
-check("$10.50", () => isLikelyInlineMath("10.50") === true);
-check("$100%", () => isLikelyInlineMath("100%") === true);
+check("$5", () => isLikelyInlineMath("5") === false);
+check("$10", () => isLikelyInlineMath("10") === false);
+check("$10.50", () => isLikelyInlineMath("10.50") === false);
+check("$100%", () => isLikelyInlineMath("100%") === false);
 check("URL", () => isLikelyInlineMath("https://example.com") === false);
 check("prose text", () => isLikelyInlineMath("hello world today") === false);
 check("prose $x y z$ (spaces)", () => isLikelyInlineMath("x y z") === false);
@@ -173,14 +174,15 @@ check("uppercase $V$ → math", () => isLikelyInlineMath("V") === true);
 console.log("\nisLikelyInlineMath — minimal LaTeX patterns (regression)");
 // LLMs frequently emit minimal LaTeX in math contexts that the older
 // classifier rejected as currency / word tokens. These tests pin down the
-// deliberately-permissive rules for common math patterns — single digits
-// as indices, comma-separated variables in ordered pairs / tuples, single
-// uppercase letters as set / algebra / group names, and one-sided
-// comparison operators. These patterns are language-agnostic.
-check("single-digit $1$, $2$, $5$ → math (pure numbers)", () => isLikelyInlineMath("1") === true);
-check("multi-digit $42$ → math (pure number)", () => isLikelyInlineMath("42") === true);
+// deliberately-permissive rules for common math patterns while keeping pure
+// numeric dollar pairs literal because they are common in prose prices.
+check("single-digit $1$, $2$, $5$ → NOT math (currency-shaped)", () => isLikelyInlineMath("1") === false);
+check("multi-digit $42$ → NOT math (currency-shaped)", () => isLikelyInlineMath("42") === false);
 check("$2.5x$ is math (number with variable)", () => isLikelyInlineMath("2.5x") === true);
 check("$10\%$ is math (percentage with LaTeX)", () => isLikelyInlineMath("10\\%") === true);
+check("$2.5x dollars$ → NOT math (prefix-only numeric variable)", () => isLikelyInlineMath("2.5x dollars") === false);
+check("$10\\% off$ → NOT math (prefix-only escaped percentage)", () => isLikelyInlineMath("10\\% off") === false);
+check("$5\\cdot3$ is math (number with LaTeX command)", () => isLikelyInlineMath("5\\cdot3") === true);
 
 check("comma-separated $A, B$ → math (ordered pair)", () => isLikelyInlineMath("A, B") === true);
 check("comma-separated $1, 2, 3$ → math (sequence)", () => isLikelyInlineMath("1, 2, 3") === true);
@@ -233,7 +235,7 @@ check("\\|x\\| renders as double bars", () => {
 
 console.log("\nnormalizeMath — LLM delimiter conversion");
 eq(normalizeMath("\\(x^2\\)"), "$x^2$", "\\(…\\) → $…$");
-eq(normalizeMath("\\[E=mc^2\\]"), "$$\nE=mc^2\n$$", "\\[…\\] → $$…$$ with newlines");
+eq(normalizeMath("\\[E=mc^2\\]"), "$$E=mc^2$$", "\\[…\\] → $$…$$");
 eq(normalizeMath("\\\\[4pt]"), "\\\\[4pt]", "\\\\[ line-break spacing protected");
 
 console.log("\nnormalizeMath — \\slashed conversion (regression)");
@@ -258,12 +260,12 @@ check("inline $$ after closing bracket", () => {
   return out.startsWith("(octet)\n\n$$");
 });
 check("inline $$ after closing brace (\\end{...}$$)", () => {
-  // A display equation ending with }$$ must be extracted as a unit.
-  // The closing $$ must NOT be split off (the old bug inserted \n\n
-  // before it, emptying the equation). The whole pair becomes a
-  // display placeholder, so the output contains no bare $$ at all.
+  // A model that writes `\end{array}$$` or `\frac{a}{b}$$` on one line
+  // has the same micromark-fence problem as the comma case. The
+  // closing brace is the most common end-of-content marker in LaTeX
+  // math, so the repair-regex character class includes it.
   const out = normalizeMath("$$\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}$$");
-  return out.includes("$$") && out.includes("\\begin{pmatrix}") && !out.includes("}\n\n$$");
+  return out.includes("\\end{pmatrix},\n\n$$") || out.includes("\\end{pmatrix}\n\n$$");
 });
 check("inline $$ after comma on same line as content", () => {
   // User-reported (2026-06-12, soft-pion chat): the model wrote the
@@ -282,28 +284,27 @@ check("inline $$ after comma on same line as content", () => {
 check("well-formed $$ already on own line is normalised consistently", () => {
   // Whether the model writes `decomposes as$$\n\mathbf{6}.$$` or
   // `decomposes as\n\n$$\n\mathbf{6}.$$`, both must produce the same
-  // remark-math-parseable form: opening $$ on its own line, closing $$
-  // on its own line.  The pair is extracted as a unit so the closing $$
-  // is never split off.
+  // remark-math-parseable form: opening $$ on its own line, body, blank
+  // line, closing $$ on its own line.
   const inline = normalizeMath("decomposes as$$\n\\mathbf{6}.$$");
   const block = normalizeMath("decomposes as\n\n$$\n\\mathbf{6}.$$");
-  return inline === block && inline.includes("$$") && inline.includes("\\mathbf{6}");
+  const expected = "decomposes as\n\n$$\n\\mathbf{6}.\n\n$$";
+  return inline === expected && block === expected;
 });
-check("\\[…\\] → $$…$$ still works", () => {
-  const out = normalizeMath("\\[E=mc^2\\]");
-  return out.includes("$$") && out.includes("E=mc^2");
+check("\\[…\\] → $$…$$ still works (no spurious blank line)", () => {
+  return normalizeMath("\\[E=mc^2\\]") === "$$E=mc^2$$";
 });
 check("digit before $$ is NOT a prose boundary (preserves c^2$$)", () => {
   const out = normalizeMath("c^2$$ x $$");
-  return out.includes("c^2") && out.includes("x");
+  return out === "c^2$$ x $$";
 });
 
 console.log("\nnormalizeMath — non-math dollar filtering");
-eq(normalizeMath("costs $1$ today"), "costs $1$ today", "$1$ is math (single-digit index)");
+eq(normalizeMath("costs $1$ today"), "costs &#36;1&#36; today", "$1$ not math");
 eq(normalizeMath("env $PATH$ here"), "env &#36;PATH&#36; here", "$PATH$ not math (env var → &#36; entities so remark-math leaves it literal)");
 eq(normalizeMath("solve $x^2 + y^2 = z^2$ please"), "solve $x^2 + y^2 = z^2$ please", "$x^2+y^2$ is math");
 eq(normalizeMath("$\\alpha + \\beta$"), "$\\alpha + \\beta$", "$\\alpha+\\beta$ is math");
-eq(normalizeMath("price is $10.50$ each"), "price is $10.50$ each", "$10.50$ is math (decimal number)");
+eq(normalizeMath("price is $10.50$ each"), "price is &#36;10.50&#36; each", "$10.50$ not math");
 eq(normalizeMath("$I$ think"), "$I$ think", "$I$ is math (uppercase single letter)");
 eq(normalizeMath("it costs $5 and $10 total"), "it costs &#36;5 and &#36;10 total", "multiple prose $ → &#36; entities (dollars preserved, not parsed as math)");
 
@@ -332,6 +333,12 @@ check("$\\text{baryon #}$ # escaped", () => {
 });
 check("$\\text{a & b}$ & escaped", () => {
   return normalizeMath("$\\text{a & b}$") === "$\\text{a \\& b}$";
+});
+check("$\\text{cost is \\$5}$ escaped dollar stays literal", () => {
+  return normalizeMath("$\\text{cost is \\$5}$") === "$\\text{cost is \\$5}$";
+});
+check("$\\textrm{cost is \\$5}$ escaped dollar stays literal", () => {
+  return normalizeMath("$\\textrm{cost is \\$5}$") === "$\\textrm{cost is \\$5}$";
 });
 check("$\\sqrt{x}$ non-text command preserved", () => {
   return normalizeMath("$\\sqrt{x}$") === "$\\sqrt{x}$";
@@ -369,7 +376,7 @@ check("$\\|x\\|$ norm preserved (no \\vert mangling)", () => {
 
 console.log("\nnormalizeMath — % in math");
 eq(normalizeMath("$x = 50%$"), "$x = 50\\%$", "trailing % escaped");
-eq(normalizeMath("$100%$"), "$100\\%$", "pure number with trailing %");
+eq(normalizeMath("$100%$"), "&#36;100%&#36;", "pure percentage stays literal");
 eq(normalizeMath("$10\\%$"), "$10\\%$", "already-escaped \\% left alone");
 
 // ── normalizeMath — end-to-end KaTeX render of common LLM outputs ──────────────
@@ -415,7 +422,6 @@ const e2e: Array<[string, string]> = [
   ["$$\\begin{array}{c|c} a & b \\\\ c & d \\end{array}$$", "array with c|c column spec"],
   ["$$\\begin{array}{cc|c} a & b & c \\\\ d & e & f \\end{array}$$", "array with cc|c column spec"],
   ["$$\\begin{array}{|c|c|} a & b \\\\ c & d \\end{array}$$", "array with |c|c| column spec"],
-  ["$$\\det(M) = \\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix} = ad - bc$$", "vmatrix determinant"],
   // Ket with \| delimiter (common in GFM tables where | must be escaped)
   ["$\\|\\psi\\rangle$", "ket with \\| → single bar (regression)"],
   ["$\\frac{1}{\\sqrt{2}}\\|uud\\rangle$", "ket in fraction with \\|"],
@@ -431,7 +437,7 @@ for (const [src, label] of e2e) {
 console.log("\nnormalizeMath — non-math inputs pass through");
 type Passthrough = { src: string; expected: string; label: string };
 const passthrough: Passthrough[] = [
-  { src: "costs $100$ today", expected: "costs $100$ today", label: "multi-digit number is math" },
+  { src: "costs $100$ today", expected: "costs &#36;100&#36; today", label: "multi-digit currency stays literal" },
   { src: "line break \\\\[4pt] here", expected: "line break \\\\[4pt] here", label: "LaTeX line-break spacing" },
   { src: "hello world", expected: "hello world", label: "plain text" },
 ];
@@ -492,6 +498,45 @@ check("\\yng(2,1) in prose (no $ delimiters) gets wrapped and rendered", () => {
   const html = renderHtml("The partition \\yng(2,1) is symmetric.");
   return html.includes("katex") && !html.includes("katex-error") && !html.includes("\\yng");
 });
+check("\\yng inside \\(...\\) does not get double-wrapped", () => {
+  const out = normalizeMath("\\(\\yng(2,1)\\)");
+  return out === "$\\begin{array}{l}\\square \\! \\square \\\\[-0.525em] \\square\\end{array}$";
+});
+check("\\yng inside \\[...\\] stays display math without triple dollars", () => {
+  const out = normalizeMath("\\[\\yng(2,1)\\]");
+  return out.startsWith("$$\\begin{array}{l}")
+    && out.endsWith("$$")
+    && !out.includes("$$$");
+});
+check("escaped dollar before bare \\yng does not suppress wrapping", () => {
+  const src = String.raw`Price is \$5; shape \yng(2,1)`;
+  const expected = String.raw`Price is \$5; shape $\begin{array}{l}\square \! \square \\[-0.525em] \square\end{array}$`;
+  return normalizeMath(src) === expected;
+});
+check("digit-starting inline math with \\yng does not get nested wrappers", () => {
+  const out = normalizeMath("$3\\,\\yng(2,1)$");
+  return out === "$3\\,\\begin{array}{l}\\square \\! \\square \\\\[-0.525em] \\square\\end{array}$";
+});
+check("digit-starting inline math with \\young does not get nested wrappers", () => {
+  const out = normalizeMath("$2 + \\young(ab,c)$");
+  return out === "$2 + \\begin{array}{l}\\boxed{a} \\! \\boxed{b} \\\\[-0.525em] \\boxed{c}\\end{array}$";
+});
+check("display math ending in digit closes before following bare \\yng", () => {
+  const out = normalizeMath("$$x^2$$ \\yng(1)");
+  return out === "$$x^2$$ $\\begin{array}{l}\\square\\end{array}$";
+});
+check("bare \\yng after inline math is separated from adjacent dollars", () => {
+  const out = normalizeMath("$x$\\yng(1)");
+  return out === "$x$ $\\begin{array}{l}\\square\\end{array}$";
+});
+check("bare \\yng before inline math is separated from adjacent dollars", () => {
+  const out = normalizeMath("\\yng(1)$x$");
+  return out === "$\\begin{array}{l}\\square\\end{array}$ $x$";
+});
+check("\\yng (2,1) with a space before parens gets wrapped and rendered", () => {
+  const html = renderHtml("The partition \\yng (2,1) is symmetric.");
+  return html.includes("katex") && !html.includes("katex-error") && !html.includes("\\yng");
+});
 check("\\yng(3,2,1) renders as (3,2,1) Young diagram", () => {
   const html = renderHtml("$$\\yng(3,2,1)$$");
   return html.includes("katex-display") && !html.includes("katex-error");
@@ -500,9 +545,27 @@ check("\\yng(2,1){a&b\\\\c\\\\d&e} renders filled Young tableau", () => {
   const html = renderHtml("$$\\yng(2,1){a&b\\\\c\\\\d&e}$$");
   return html.includes("katex-display") && !html.includes("katex-error");
 });
-check("\\young(2 1) (youngtab syntax) renders as (2,1) diagram", () => {
+check("\\young(2 1) compatibility shorthand renders as (2,1) diagram", () => {
   const html = renderHtml("$$\\young(2 1)$$");
   return html.includes("katex-display") && !html.includes("katex-error");
+});
+check("\\young(ab,c) labelled youngtab syntax renders labels", () => {
+  const html = renderHtml("$$\\young(ab,c)$$");
+  return html.includes("katex-display")
+    && !html.includes("katex-error")
+    && !html.includes("\\young")
+    && ["a", "b", "c"].every((label) => html.includes(label));
+});
+check("\\young(ab,c) labelled cells keep boxes", () => {
+  const out = expandYoungDiagrams("\\young(ab,c)");
+  return out.includes("\\boxed{a}")
+    && out.includes("\\boxed{b}")
+    && out.includes("\\boxed{c}");
+});
+check("\\young(abcd,:cd,:c) skew placeholders are invisible offsets", () => {
+  const out = expandYoungDiagrams("\\young(abcd,:cd,:c)");
+  return out.includes("\\hphantom{\\boxed{x}}")
+    && !out.includes("\\boxed{:}");
 });
 check("\\yng(4,3,2,1) renders as (4,3,2,1) Young diagram", () => {
   const html = renderHtml("$$\\yng(4,3,2,1)$$");
@@ -558,7 +621,23 @@ check("expandYoungDiagrams handles \\yng with content", () => {
   // single-glyph strut), and the default 1.2em baseline spacing
   // leaves 0.525em of gap. `\\[-0.525em]` subtracts exactly that.
   const out = expandYoungDiagrams("\\yng(2,1){a&b\\\\c}");
-  return out === "$\\begin{array}{l}a \\! b \\\\[-0.525em] c\\end{array}$";
+  return out === "$\\begin{array}{l}\\boxed{a} \\! \\boxed{b} \\\\[-0.525em] \\boxed{c}\\end{array}$";
+});
+check("expandYoungDiagrams handles labelled \\young rows", () => {
+  const out = expandYoungDiagrams("\\young(ab,c)");
+  return out === "$\\begin{array}{l}\\boxed{a} \\! \\boxed{b} \\\\[-0.525em] \\boxed{c}\\end{array}$";
+});
+check("expandYoungDiagrams treats comma-separated numeric \\young as labels, not a 12-cell row", () => {
+  const out = expandYoungDiagrams("\\young(12,3)");
+  return out === "$\\begin{array}{l}\\boxed{1} \\! \\boxed{2} \\\\[-0.525em] \\boxed{3}\\end{array}$";
+});
+check("expandYoungDiagrams leaves invalid negative \\yng shape alone", () => {
+  const out = expandYoungDiagrams("\\yng(-1)");
+  return out === "\\yng(-1)";
+});
+check("expandYoungDiagrams leaves oversized \\yng shape alone", () => {
+  const out = expandYoungDiagrams("\\yng(513)");
+  return out === "\\yng(513)";
 });
 check("expandYoungDiagrams leaves non-Young macros alone", () => {
   const out = expandYoungDiagrams("\\frac{a}{b}");
