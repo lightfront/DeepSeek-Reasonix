@@ -1,6 +1,18 @@
 // Run: tsx src/__tests__/crash-reporting.test.ts
 
-import { buildCrashPayload, normalizeCrashError, topFrameFromStack } from "../lib/crash";
+import {
+  buildCrashPayload,
+  buildPerformancePayload,
+  formatPerformanceContext,
+  normalizeCrashError,
+  parseReportedPerf,
+  performanceLabelForReason,
+  serializeReportedPerf,
+  shouldPromptForPerformanceLabel,
+  shouldRecordLongTaskSample,
+  topFrameFromStack,
+  type PerformanceSnapshot,
+} from "../lib/crash";
 
 let passed = 0;
 let failed = 0;
@@ -28,6 +40,53 @@ eq(payload.source, "frontend.global", "global handler payload identifies source"
 eq(payload.errorType, "TypeError", "captures error type");
 eq(payload.componentStack, "component stack", "captures component stack");
 eq(payload.message.includes("[unhandledrejection]"), true, "keeps human-readable message");
+
+const perf: PerformanceSnapshot = {
+  reason: "event loop lag 1300ms",
+  uptimeMs: 42_000,
+  visibility: "visible",
+  focused: true,
+  online: true,
+  hardwareConcurrency: 10,
+  deviceMemoryGb: 16,
+  jsHeap: { usedMb: 700, totalMb: 780, limitMb: 900, usagePercent: 77.7 },
+  eventLoopLag: { currentMs: 1300, maxMs: 1300, avgMs: 220, samples: 6 },
+  longTasks: {
+    count: 3,
+    totalMs: 1800,
+    maxMs: 900,
+    recent: [
+      { startMs: 40_000, durationMs: 900 },
+      { startMs: 41_000, durationMs: 500 },
+    ],
+  },
+  connection: { effectiveType: "4g", rttMs: 50, downlinkMbps: 20, saveData: false },
+};
+const perfPayload = buildPerformancePayload(perf);
+eq(perfPayload.kind, "performance", "performance pressure reports use performance kind");
+eq(perfPayload.source, "frontend.performance", "performance pressure reports identify source");
+eq(perfPayload.label, "performance.lag", "performance pressure reports partition by stable pressure label");
+eq(perfPayload.errorType, "PerformancePressure", "performance pressure reports use a stable error type");
+eq(perfPayload.errorMessage.includes("1300"), false, "performance fingerprint message avoids dynamic durations");
+eq(perfPayload.label.includes("1300"), false, "performance fingerprint label avoids dynamic durations");
+eq(formatPerformanceContext(perf).includes("long tasks: 3"), true, "formats long task context");
+eq(perfPayload.message.includes("event loop lag 1300ms"), true, "payload message keeps lag context");
+eq(performanceLabelForReason("long task 900ms"), "performance.longtask", "labels long task pressure");
+eq(performanceLabelForReason("js heap 87% of limit"), "performance.heap", "labels heap pressure");
+eq(shouldRecordLongTaskSample(14_000, 900, 15_000), false, "ignores startup long tasks before grace ends");
+eq(shouldRecordLongTaskSample(16_000, 40, 15_000), false, "ignores short long-task observer entries");
+eq(shouldRecordLongTaskSample(16_000, 900, 15_000), true, "records post-grace long tasks");
+
+eq(shouldPromptForPerformanceLabel(false, 11 * 60_000, false), true, "prompts an unhandled label past cooldown while visible");
+eq(shouldPromptForPerformanceLabel(true, 11 * 60_000, false), false, "suppresses an already reported or dismissed label");
+eq(shouldPromptForPerformanceLabel(false, 5 * 60_000, false), false, "respects the prompt cooldown window");
+eq(shouldPromptForPerformanceLabel(false, 11 * 60_000, true), false, "never prompts while the window is hidden");
+
+const reportedPerf = serializeReportedPerf(new Set(["performance.lag"]), "abc123");
+eq([...parseReportedPerf(reportedPerf, "abc123")], ["performance.lag"], "round-trips reported labels for the same build");
+eq([...parseReportedPerf(reportedPerf, "def456")], [], "re-surfaces reported labels on a new build");
+eq([...parseReportedPerf(null, "abc123")], [], "tolerates missing storage");
+eq([...parseReportedPerf("{not json", "abc123")], [], "tolerates corrupt storage");
 
 console.log(`\n${passed} passed, ${failed} failed, ${passed + failed} total`);
 if (failed > 0) process.exit(1);
