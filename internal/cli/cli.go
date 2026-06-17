@@ -37,6 +37,11 @@ import (
 	"golang.org/x/term"
 )
 
+var (
+	runInteractiveSession = chatREPL
+	cliIsInteractive      = isInteractive
+)
+
 // Run is the CLI entry point; it returns a process exit code.
 func Run(args []string, version string) int {
 	// Pick the UI language up front so even pre-config paths (the first-run
@@ -50,6 +55,9 @@ func Run(args []string, version string) int {
 	if cmd == "--acp" {
 		cmd = "acp"
 	}
+	if len(args) > 0 && isDefaultInteractiveFlag(cmd) {
+		cmd = ""
+	}
 	if shouldMigrateLegacyConfigForCLI(cmd) {
 		migrateLegacyConfigForCLI()
 	}
@@ -59,9 +67,16 @@ func Run(args []string, version string) int {
 		}
 	}
 
+	if len(args) == 0 && cliIsInteractive() {
+		return runInteractiveSession(nil)
+	}
 	if len(args) == 0 {
 		configureCLIThemeFromConfigForTTYOutput()
-		return welcome(version)
+		usage()
+		return 0
+	}
+	if cmd == "" {
+		return runInteractiveSession(args)
 	}
 
 	rest := args[1:]
@@ -69,7 +84,7 @@ func Run(args []string, version string) int {
 	case "run":
 		return runAgent(rest)
 	case "chat", "code": // "code" is the v0.x name for the interactive session
-		return chatREPL(rest)
+		return runInteractiveSession(rest)
 	case "serve":
 		return runServe(rest)
 	case "setup":
@@ -113,6 +128,17 @@ func Run(args []string, version string) int {
 		usage()
 		return 2
 	}
+}
+
+func isDefaultInteractiveFlag(arg string) bool {
+	switch arg {
+	case "--model", "--max-steps", "--continue", "-c", "--resume", "--dangerously-skip-permissions", "--yolo", "--dir":
+		return true
+	}
+	if name, _, ok := strings.Cut(arg, "="); ok && isDefaultInteractiveFlag(name) {
+		return true
+	}
+	return false
 }
 
 func shouldMigrateLegacyConfigForCLI(cmd string) bool {
@@ -209,6 +235,23 @@ func chdirTo(dir string) int {
 	return 0
 }
 
+func modelForResumePath(modelName, resumePath string, cfg *config.Config) string {
+	if strings.TrimSpace(modelName) != "" || strings.TrimSpace(resumePath) == "" {
+		return modelName
+	}
+	sessionModel, ok := agent.LoadSessionModel(resumePath)
+	if !ok {
+		return modelName
+	}
+	if cfg == nil {
+		return sessionModel
+	}
+	if _, ok := cfg.ResolveModel(sessionModel); !ok {
+		return modelName
+	}
+	return sessionModel
+}
+
 var newNotificationSender = func() notify.Sender { return notify.NewPlatformSender() }
 
 // withNotifications adds system notifications to CLI event streams when configured.
@@ -270,6 +313,13 @@ func runAgent(args []string) int {
 		sink = metrics
 	}
 	sink = withNotifications(sink, cfg)
+	if *resume != "" {
+		*model = modelForResumePath(*model, *resume, cfg)
+	} else if *cont {
+		if sessions, err := agent.ListSessions(resolveCLISessionDir()); err == nil && len(sessions) > 0 {
+			*model = modelForResumePath(*model, sessions[0].Path, cfg)
+		}
+	}
 	ctrl, err := setup(ctx, *model, *maxSteps, true, sink)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, err)
@@ -337,6 +387,8 @@ func runServe(args []string) int {
 
 	ctx := context.Background()
 	bc := serve.NewBroadcaster()
+	cfg, _ := config.Load()
+	*model = modelForResumePath(*model, *resume, cfg)
 	ctrl, err := setup(ctx, *model, *maxSteps, true, bc)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, err)
@@ -371,7 +423,7 @@ func runServe(args []string) int {
 // prompt loop that keeps conversation context across turns. Exit with
 // 'exit'/'quit' or Ctrl-D.
 func chatREPL(args []string) int {
-	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
+	fs := flag.NewFlagSet("reasonix", flag.ContinueOnError)
 	model := fs.String("model", "", "provider name (default: config default_model)")
 	maxSteps := fs.Int("max-steps", 0, "max tool-call rounds (0 = use config/default)")
 	cont := fs.Bool("continue", false, "resume the most recent saved session")
@@ -411,6 +463,7 @@ func chatREPL(args []string) int {
 	}
 
 	ctx := context.Background()
+	*model = modelForResumePath(*model, resumePath, cfg)
 
 	// Plumb the controller's typed event stream through a channel so each event
 	// can become a tea.Msg inside the TUI's update loop. Buffered generously:
@@ -655,7 +708,7 @@ func setupConfig(args []string) int {
 	if isInteractive() {
 		rc := interactiveSetup(t.config, t.env)
 		if rc == 0 {
-			fmt.Printf(i18n.M.TryHintFmt+"\n", bold("reasonix chat"))
+			fmt.Printf(i18n.M.TryHintFmt+"\n", bold("reasonix"))
 		}
 		return rc
 	}
@@ -1399,32 +1452,6 @@ func withBuiltinFamiliesForLanguage(providers []config.ProviderEntry, pricingLan
 	return providers
 }
 
-// promptMissingKeys re-runs the wizard's key-entry step for model refs that are
-// actually active and whose api_key_env is unset. Newly entered values are
-// written to the reasonix-owned global credential store so the chat session that
-// follows picks them up via config.Load. The user can hit Enter to skip — the chat
-// banner falls back to a one-line warning so they still see what's missing.
-// Returns a non-zero exit code only when writing the env file fails.
-func promptMissingKeys(cfg *config.Config) int {
-	missing := providersWithMissingKeys(cfg)
-	if len(missing) == 0 {
-		return 0
-	}
-	fmt.Println()
-	fmt.Println(dim("  " + i18n.M.MissingKeyIntro))
-	envLines := configureKeys(missing, os.Stdin, os.Stdout)
-	if len(envLines) == 0 {
-		return 0
-	}
-	target, err := config.StoreCredentialLines(envLines)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, i18n.M.WriteEnvErr, err)
-		return 1
-	}
-	fmt.Printf("%s %s\n", green("✓"), fmt.Sprintf(i18n.M.WroteFileFmt, displayPath(target)))
-	return 0
-}
-
 // providersWithMissingKeys returns the providers the active configuration
 // actually references (default/planner/subagent models) whose api_key_env is
 // declared but not set. Merely-available presets stay silent — a DeepSeek-only
@@ -1599,107 +1626,6 @@ func readStdin() string {
 	}
 	data, _ := io.ReadAll(os.Stdin)
 	return strings.TrimSpace(string(data))
-}
-
-// welcome is the zero-arg landing screen: it reports config and key readiness,
-// then guides the user to the next concrete step.
-func welcome(version string) int {
-	src := config.SourcePath()
-
-	// Load early for the welcome/status view. config.Load also succeeds with the
-	// built-in defaults, so SourcePath is the actual "user has configured" signal.
-	cfg, cfgErr := config.Load()
-	if cfgErr != nil {
-		cfg = config.Default()
-	}
-
-	// First run on an interactive terminal: actively guide setup rather than
-	// printing a static screen and exiting. interactiveSetup owns the language
-	// prompt and welcome banner so every prompt the user sees is already
-	// localized to their choice.
-	if src == "" && isInteractive() {
-		if rc := interactiveSetup(defaultConfigTarget(), defaultEnvTarget()); rc != 0 {
-			return rc
-		}
-		// Config just written; reload so the credential store (and any pinned
-		// language) is picked up. If the chosen provider's key is ready, drop into chat.
-		if cfg, err := config.Load(); err == nil && cfg.Validate(cfg.DefaultModel) == nil {
-			if cfg.Language != "" {
-				i18n.DetectLanguage(cfg.Language)
-			}
-			fmt.Printf("\n"+i18n.M.StartingChatFmt+"\n\n", bold("reasonix chat"))
-			return chatREPL(nil)
-		}
-		fmt.Println("\n" + i18n.M.SetKeyHint)
-		return 0
-	}
-
-	// A real config source exists (cwd-local or user-global) on a terminal: go into
-	// chat. If any enabled provider's key isn't set yet, re-run the wizard's key-entry
-	// step inline — first run already chose language and providers, so we don't
-	// re-ask those. Skipping the prompts is still fine; the chat banner falls back
-	// to a one-line warning. Do not do this for the built-in defaults alone: that
-	// would ask for every default provider key even though the user has not opted
-	// into those providers yet.
-	if welcomeShouldPromptMissingKeys(src, cfgErr) && isInteractive() {
-		if rc := promptMissingKeys(cfg); rc != 0 {
-			return rc
-		}
-		return chatREPL(nil)
-	}
-
-	var b strings.Builder
-	b.WriteString(boxed([]string{
-		accent("◆") + " " + bold("reasonix") + "  " + dim(version),
-		dim(i18n.M.Subtitle),
-	}))
-
-	switch {
-	case src == "":
-		fmt.Fprintf(&b, "\n  %s %s\n", padRight(i18n.M.ConfigLabel, 8), dim(i18n.M.ConfigNotFound))
-	case cfgErr != nil:
-		fmt.Fprintf(&b, "\n  %s %s\n", padRight(i18n.M.ConfigLabel, 8), yellow(fmt.Sprintf(i18n.M.ConfigErrorFmt, src, cfgErr)))
-	default:
-		fmt.Fprintf(&b, "\n  %s %s\n", padRight(i18n.M.ConfigLabel, 8), src)
-	}
-
-	ready := 0
-	for i, p := range cfg.Providers {
-		label := i18n.M.ModelsLabel
-		if i > 0 {
-			label = ""
-		}
-		dot, status := yellow("●"), dim(i18n.M.NoKey)
-		if p.APIKey() != "" {
-			dot, status = green("●"), green(i18n.M.Ready)
-			ready++
-		}
-		fmt.Fprintf(&b, "  %s %s %s%s\n", padRight(label, 8), dot, padRight(p.Name, 16), status)
-	}
-
-	fmt.Fprintf(&b, "\n  %s %s\n", accent("▌"), bold(i18n.M.GetStarted))
-	n := 1
-	step := func(cmd, desc string) {
-		fmt.Fprintf(&b, "    %s  %s %s\n", accent(fmt.Sprint(n)), padRight(cmd, 16), dim(desc))
-		n++
-	}
-	if src == "" {
-		step("reasonix setup", i18n.M.StepScaffold)
-	}
-	if ready == 0 {
-		step(i18n.M.StepSetKey, i18n.M.StepSetKeyHint)
-	}
-	step("reasonix chat", i18n.M.StepChatDesc)
-	step(`reasonix run "task"`, i18n.M.StepRunDesc)
-
-	fmt.Fprintf(&b, "\n  %s\n", dim(i18n.M.HelpFooter))
-
-	fmt.Print(b.String())
-	return 0
-}
-
-func welcomeShouldPromptMissingKeys(src string, cfgErr error) bool {
-	return strings.TrimSpace(src) != "" && cfgErr == nil
 }
 
 func usage() {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"reasonix/internal/agent"
 	"reasonix/internal/config"
 	"reasonix/internal/event"
 	"reasonix/internal/i18n"
@@ -50,6 +50,40 @@ func TestChdirTo(t *testing.T) {
 
 	if rc := chdirTo(filepath.Join(tmp, "does-not-exist")); rc != 2 {
 		t.Fatalf("chdirTo(missing) = %d, want 2", rc)
+	}
+}
+
+func TestModelForResumePathUsesStoredModelWhenAvailable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	session := agent.NewSession("sys")
+	session.Add(provider.Message{Role: provider.RoleUser, Content: "hello"})
+	if err := session.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.SetBranchModelPreserveUpdated(path, "saved/model"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		DefaultModel: "default/model",
+		Providers: []config.ProviderEntry{
+			{Name: "default", Kind: "openai", BaseURL: "https://default.invalid/v1", Model: "model"},
+			{Name: "saved", Kind: "openai", BaseURL: "https://saved.invalid/v1", Model: "model"},
+		},
+	}
+
+	if got := modelForResumePath("", path, cfg); got != "saved/model" {
+		t.Fatalf("modelForResumePath = %q, want saved/model", got)
+	}
+	if got := modelForResumePath("explicit/model", path, cfg); got != "explicit/model" {
+		t.Fatalf("explicit model was overwritten: %q", got)
+	}
+	if got := modelForResumePath("", filepath.Join(dir, "missing.jsonl"), cfg); got != "" {
+		t.Fatalf("missing session model = %q, want empty fallback", got)
+	}
+	cfg.Providers = cfg.Providers[:1]
+	if got := modelForResumePath("", path, cfg); got != "" {
+		t.Fatalf("unknown stored model = %q, want empty fallback", got)
 	}
 }
 
@@ -137,6 +171,110 @@ func TestRunDispatchesACPLongFlagAlias(t *testing.T) {
 	}
 	if strings.Contains(errOut, "unknown command") {
 		t.Fatalf("--acp should not be treated as an unknown command:\n%s", errOut)
+	}
+}
+
+func TestRunDefaultsToInteractiveSession(t *testing.T) {
+	isolateCLIConfigHome(t)
+
+	prev := runInteractiveSession
+	prevInteractive := cliIsInteractive
+	t.Cleanup(func() {
+		runInteractiveSession = prev
+		cliIsInteractive = prevInteractive
+	})
+	cliIsInteractive = func() bool { return true }
+
+	var gotArgs []string
+	runInteractiveSession = func(args []string) int {
+		gotArgs = append([]string(nil), args...)
+		return 17
+	}
+
+	if rc := Run(nil, "test-version"); rc != 17 {
+		t.Fatalf("Run(nil) rc = %d, want 17", rc)
+	}
+	if gotArgs != nil {
+		t.Fatalf("interactive args = %#v, want nil", gotArgs)
+	}
+}
+
+func TestRunNoArgsNonInteractivePrintsUsage(t *testing.T) {
+	isolateCLIConfigHome(t)
+
+	prev := runInteractiveSession
+	prevInteractive := cliIsInteractive
+	t.Cleanup(func() {
+		runInteractiveSession = prev
+		cliIsInteractive = prevInteractive
+	})
+	cliIsInteractive = func() bool { return false }
+	runInteractiveSession = func(args []string) int {
+		t.Fatalf("non-interactive no-arg Run should not start session with %#v", args)
+		return 99
+	}
+
+	out := captureStdout(t, func() {
+		if rc := Run(nil, "test-version"); rc != 0 {
+			t.Fatalf("Run(nil) rc = %d, want 0", rc)
+		}
+	})
+	if !strings.Contains(out, "reasonix —") || !strings.Contains(out, "reasonix run") {
+		t.Fatalf("non-interactive no-arg Run should print usage, got:\n%s", out)
+	}
+}
+
+func TestRunRoutesBareInteractiveFlagsToSession(t *testing.T) {
+	isolateCLIConfigHome(t)
+
+	prev := runInteractiveSession
+	t.Cleanup(func() { runInteractiveSession = prev })
+
+	for _, args := range [][]string{
+		{"--continue"},
+		{"--continue=true"},
+		{"-c=true"},
+		{"--resume=true"},
+		{"--yolo=true"},
+		{"--dangerously-skip-permissions=true"},
+	} {
+		var gotArgs []string
+		runInteractiveSession = func(args []string) int {
+			gotArgs = append([]string(nil), args...)
+			return 23
+		}
+
+		if rc := Run(args, "test-version"); rc != 23 {
+			t.Fatalf("Run(%#v) rc = %d, want 23", args, rc)
+		}
+		if !reflect.DeepEqual(gotArgs, args) {
+			t.Fatalf("interactive args = %#v, want %#v", gotArgs, args)
+		}
+	}
+}
+
+func TestRunKeepsChatAndCodeCompatibilityAliases(t *testing.T) {
+	isolateCLIConfigHome(t)
+
+	prev := runInteractiveSession
+	t.Cleanup(func() { runInteractiveSession = prev })
+
+	var calls [][]string
+	runInteractiveSession = func(args []string) int {
+		calls = append(calls, append([]string(nil), args...))
+		return 0
+	}
+
+	if rc := Run([]string{"chat", "--resume"}, "test-version"); rc != 0 {
+		t.Fatalf("Run(chat --resume) rc = %d, want 0", rc)
+	}
+	if rc := Run([]string{"code", "--continue"}, "test-version"); rc != 0 {
+		t.Fatalf("Run(code --continue) rc = %d, want 0", rc)
+	}
+
+	want := [][]string{{"--resume"}, {"--continue"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("interactive calls = %#v, want %#v", calls, want)
 	}
 }
 
@@ -325,18 +463,6 @@ func TestConfigReasoningLanguageRejectsAliases(t *testing.T) {
 	})
 	if !strings.Contains(errOut, "must be auto|zh|en") {
 		t.Fatalf("config reasoning-language alias stderr = %q", errOut)
-	}
-}
-
-func TestWelcomePromptMissingKeysRequiresConfigSource(t *testing.T) {
-	if welcomeShouldPromptMissingKeys("", nil) {
-		t.Fatal("built-in defaults without a config source should not prompt for missing provider keys")
-	}
-	if welcomeShouldPromptMissingKeys("reasonix.toml", errors.New("bad config")) {
-		t.Fatal("invalid config should not enter the missing-key prompt path")
-	}
-	if !welcomeShouldPromptMissingKeys("reasonix.toml", nil) {
-		t.Fatal("valid config source should enter the missing-key prompt path")
 	}
 }
 

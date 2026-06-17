@@ -24,6 +24,7 @@ import (
 	"reasonix/internal/memory"
 	"reasonix/internal/plugin"
 	"reasonix/internal/provider"
+	"reasonix/internal/tool"
 )
 
 // setTestCtrl creates a minimal workspace tab (if needed) and sets its
@@ -80,6 +81,20 @@ func modelRefsFromView(models []ModelInfo) map[string]bool {
 	}
 	return out
 }
+
+type desktopFakeTool struct {
+	name string
+}
+
+func (t desktopFakeTool) Name() string { return t.name }
+
+func (desktopFakeTool) Description() string { return "fake desktop tool" }
+
+func (desktopFakeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (desktopFakeTool) Execute(context.Context, json.RawMessage) (string, error) { return "", nil }
+
+func (desktopFakeTool) ReadOnly() bool { return true }
 
 type desktopAskRuntimeRunner struct {
 	ask func(context.Context) error
@@ -815,6 +830,8 @@ func TestSettingsDoesNotInferBuiltInsWithoutKeys(t *testing.T) {
 
 func TestAddOfficialProviderAccessReplacesLegacyProviderWithoutModel(t *testing.T) {
 	isolateDesktopUserDirs(t)
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	os.Unsetenv("DEEPSEEK_API_KEY")
 	if err := os.MkdirAll(filepath.Dir(config.UserConfigPath()), 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
@@ -830,7 +847,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := NewApp().AddOfficialProviderAccess("deepseek", "test-key"); err != nil {
+	if _, err := NewApp().AddOfficialProviderAccess("deepseek", "test-key"); err != nil {
 		t.Fatalf("AddOfficialProviderAccess: %v", err)
 	}
 	cfg := config.LoadForEdit(config.UserConfigPath())
@@ -861,7 +878,7 @@ language = "zh"
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := NewApp().AddOfficialProviderAccess("deepseek", ""); err != nil {
+	if _, err := NewApp().AddOfficialProviderAccess("deepseek", ""); err != nil {
 		t.Fatalf("AddOfficialProviderAccess: %v", err)
 	}
 	cfg := config.LoadForEdit(config.UserConfigPath())
@@ -2303,6 +2320,28 @@ args = ["-y", "@playwright/mcp"]
 	t.Fatalf("playwright MCP missing from Capabilities: %+v", view.Servers)
 }
 
+func TestMCPServersMatchesCapabilitiesServerProjection(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	dir := robustTempDir(t)
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reasonix.toml"), []byte(`
+[[plugins]]
+name = "playwright"
+command = "npx"
+args = ["-y", "@playwright/mcp"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.setTestCtrl(control.New(control.Options{Host: plugin.NewHost()}), "")
+	defer app.activeCtrl().Close()
+
+	if got, want := app.MCPServers(), app.Capabilities().Servers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("MCPServers() = %+v, want Capabilities().Servers %+v", got, want)
+	}
+}
+
 func TestConfiguredMCPWithFormerBuiltInNameIsUserServer(t *testing.T) {
 	isolateDesktopUserDirs(t)
 	dir := robustTempDir(t)
@@ -2708,6 +2747,62 @@ tier = "background"
 		}
 	}
 	t.Fatalf("broken MCP missing from Capabilities: %+v", view.Servers)
+}
+
+func TestReconnectMCPServerClearsInitializingPlaceholderAndRecordsFailure(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	dir := robustTempDir(t)
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reasonix.toml"), []byte(`
+[[plugins]]
+name = "codegraph"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := tool.NewRegistry()
+	reg.Add(desktopFakeTool{name: "mcp__codegraph__connect"})
+	app := NewApp()
+	app.setTestCtrl(control.New(control.Options{Host: plugin.NewHost(), Registry: reg}), "")
+	defer app.activeCtrl().Close()
+
+	view := app.Capabilities()
+	foundInitializing := false
+	for _, s := range view.Servers {
+		if s.Name == "codegraph" {
+			foundInitializing = true
+			if s.Status != "initializing" {
+				t.Fatalf("initial codegraph status = %q, want initializing; server = %+v", s.Status, s)
+			}
+		}
+	}
+	if !foundInitializing {
+		t.Fatalf("codegraph missing before reconnect: %+v", view.Servers)
+	}
+	if _, ok := reg.Get("mcp__codegraph__connect"); !ok {
+		t.Fatal("test setup expected stale codegraph connect placeholder")
+	}
+
+	if err := app.ReconnectMCPServer("codegraph"); err == nil || !strings.Contains(err.Error(), "command is required") {
+		t.Fatalf("ReconnectMCPServer error = %v, want missing command", err)
+	}
+	if _, ok := reg.Get("mcp__codegraph__connect"); ok {
+		t.Fatalf("stale codegraph placeholder still registered after reconnect failure; names=%v", reg.Names())
+	}
+	if !mcpFailed(app.activeCtrl(), "codegraph") {
+		t.Fatalf("Host.Failures() = %+v, want codegraph failure recorded", app.activeCtrl().Host().Failures())
+	}
+
+	view = app.Capabilities()
+	for _, s := range view.Servers {
+		if s.Name == "codegraph" {
+			if s.Status != "failed" || s.Error == "" {
+				t.Fatalf("codegraph after failed reconnect = %+v, want failed with error", s)
+			}
+			return
+		}
+	}
+	t.Fatalf("codegraph missing after reconnect: %+v", view.Servers)
 }
 
 func TestSetMCPServerTierRecordsConnectFailure(t *testing.T) {

@@ -132,6 +132,7 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w %q (configured: %s); note: defining [[providers]] replaces the built-in presets, so add a [[providers]] entry for it or use a configured name, or run `reasonix setup` to reconfigure", ErrUnknownModel, modelName, providerNames(cfg))
 	}
+	modelRef := entry.Name + "/" + entry.Model
 	if opts.EffortOverride != nil {
 		entry.Effort = *opts.EffortOverride
 		if entry.Kind == "anthropic" && strings.TrimSpace(entry.Effort) != "" && strings.TrimSpace(entry.Thinking) == "" {
@@ -797,6 +798,7 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 		Sink:                   sink,
 		Policy:                 policy,
 		Label:                  label,
+		ModelRef:               modelRef,
 		SystemPrompt:           sysPrompt,
 		SessionDir:             sessionDir,
 		Host:                   pluginHost,
@@ -1049,6 +1051,7 @@ func NewProvider(e *config.ProviderEntry) (provider.Provider, error) {
 // NewProviderWithProxy builds a provider.Provider with the configured ordinary
 // network proxy settings.
 func NewProviderWithProxy(e *config.ProviderEntry, proxy netclient.ProxySpec) (provider.Provider, error) {
+	keyResolution := config.ResolveCredential(e.APIKeyEnv)
 	return provider.New(e.Kind, provider.Config{
 		Name:    e.Name,
 		BaseURL: e.BaseURL,
@@ -1059,6 +1062,7 @@ func NewProviderWithProxy(e *config.ProviderEntry, proxy netclient.ProxySpec) (p
 		// default_effort when the user has not explicitly selected /effort.
 		Extra: map[string]any{
 			"api_key_env":        e.APIKeyEnv,
+			"api_key_source":     keyResolution.Source.Label,
 			"thinking":           e.Thinking,
 			"effort":             config.EffectiveEffort(e),
 			"reasoning_protocol": config.ReasoningProtocolForEntry(e),
