@@ -287,6 +287,9 @@ type Options struct {
 	// persist to disk (e.g. "Bash(go test:*)"). The callback is wired into the
 	// permission Gate on EnableInteractiveApproval.
 	OnRemember func(rule string) RememberResult
+	// PlanModeAllowedTools names tools exempt from the plan-mode read-only gate.
+	// Passed through to the executor agent so user-configured exceptions work.
+	PlanModeAllowedTools []string
 }
 
 // New builds a Controller. A nil Sink is replaced with event.Discard.
@@ -1398,6 +1401,9 @@ func (c *Controller) SetPlanMode(v bool) {
 	if c.executor != nil {
 		c.executor.SetPlanMode(v)
 	}
+	if setter, ok := c.runner.(interface{ SetPlanMode(bool) }); ok {
+		setter.SetPlanMode(v)
+	}
 }
 
 // SetAutoPlan updates the interactive auto-plan gate for subsequent turns.
@@ -1574,6 +1580,9 @@ func (c *Controller) ClearSession() error {
 func removeSessionArtifacts(path string) error {
 	if path == "" {
 		return nil
+	}
+	if err := jobs.RemoveArtifacts(path); err != nil {
+		return err
 	}
 	for _, p := range []string{path, agent.BranchMetaPath(path)} {
 		if p == "" {
@@ -2140,7 +2149,7 @@ func (c *Controller) IsDestroyingSession(sessionPath string) bool {
 
 func (c *Controller) setActiveJobSession(sessionPath string) {
 	if c.jobs != nil {
-		c.jobs.SetActiveSession(agent.BranchID(sessionPath))
+		c.jobs.SetActiveSessionPath(agent.BranchID(sessionPath), sessionPath)
 	}
 }
 

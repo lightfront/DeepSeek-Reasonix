@@ -12,6 +12,8 @@ import {
   Command,
   Download,
   SquarePen,
+  PanelLeft,
+  PanelRight,
   FileDown,
   FileImage,
   FileText,
@@ -1243,14 +1245,13 @@ export default function App() {
     [patchActiveComposerProfile, syncModeToController],
   );
   const applyCollaborationMode = useCallback(
-    (m: CollaborationMode) => {
+    (m: CollaborationMode): Promise<void> => {
       if (m === "goal") {
         patchActiveComposerProfile({ collaborationMode: "normal", goalDraftMode: true, goal: "" }, ["collaborationMode", "goal"]);
-        void setControllerCollaborationMode("normal");
-        return;
+        return setControllerCollaborationMode("normal");
       }
       patchActiveComposerProfile({ collaborationMode: m, goalDraftMode: false, goal: "" }, ["collaborationMode", "goal"]);
-      void setControllerCollaborationMode(m);
+      return setControllerCollaborationMode(m);
     },
     [patchActiveComposerProfile, setControllerCollaborationMode],
   );
@@ -2317,6 +2318,7 @@ export default function App() {
     ? [topicbarWorkspaceLabel, topicbarImSourceLabel, sidebarImScopeLabel(sidebarImDetailConnection, t)].filter(Boolean).join(" · ")
     : [topicbarWorkspacePath || topicbarWorkspaceLabel, topicbarImSourceLabel].filter(Boolean).join(" · ");
   const sidebarWorkbench = desktopLayoutStyle === "workbench";
+  const workbenchChromeHidden = sidebarWorkbench;
   const sidebarClassName = [
     "sidebar",
     sidebarCollapsed ? "sidebar--collapsed" : "",
@@ -2340,6 +2342,7 @@ export default function App() {
         className={[
           "layout",
           sidebarWorkbench ? "layout--workbench" : "",
+          workbenchChromeHidden ? "layout--workbench-chrome-hidden" : "",
           sidebarCollapsed ? "layout--sidebar-collapsed" : "",
           sidebarResizing ? "layout--resizing layout--sidebar-resizing" : "",
           workspacePanelGridOpen ? "layout--workspace-open" : "",
@@ -2350,31 +2353,33 @@ export default function App() {
           .join(" ")}
         style={layoutStyle}
       >
-        <AppChrome
-          platform={desktopPlatform}
-          browserPreviewChrome={browserPreviewChrome}
-          workbenchChrome={sidebarWorkbench}
-          tabs={visibleTabs}
-          activeTabId={visibleTabId}
-          revealActiveSignal={tabRevealSignal}
-          commandCompact={true}
-          sidebarTogglePressed={sidebarTogglePressed}
-          sidebarExpandBlocked={sidebarExpandBlocked}
-          sidebarCollapsed={sidebarCollapsed}
-          sidebarToggleTitle={sidebarToggleTitle}
-          workspacePanelMaximized={workspacePanelMaximized}
-          workspacePanelRenderable={workspacePanelRenderable}
-          workspaceTogglePressed={workspaceTogglePressed}
-          workspacePanelLabel={workspacePanelRenderable ? t("rightDock.collapse") : t("rightDock.expand")}
-          onToggleSidebar={toggleSidebar}
-          onToggleWorkspacePanel={toggleWorkspacePanel}
-          onTabChange={(id) => void handleTabChange(id)}
-          onTabClose={(id) => void handleTabClose(id)}
-          onTabsClose={(ids, nextActiveTabId) => void handleTabsClose(ids, nextActiveTabId)}
-          onTabsReorder={(ids) => void handleTabsReorder(ids)}
-          onNewTab={() => void handleNewTab()}
-          onOpenPalette={() => void openPalette()}
-        />
+        {!workbenchChromeHidden && (
+          <AppChrome
+            platform={desktopPlatform}
+            browserPreviewChrome={browserPreviewChrome}
+            workbenchChrome={sidebarWorkbench}
+            tabs={visibleTabs}
+            activeTabId={visibleTabId}
+            revealActiveSignal={tabRevealSignal}
+            commandCompact={true}
+            sidebarTogglePressed={sidebarTogglePressed}
+            sidebarExpandBlocked={sidebarExpandBlocked}
+            sidebarCollapsed={sidebarCollapsed}
+            sidebarToggleTitle={sidebarToggleTitle}
+            workspacePanelMaximized={workspacePanelMaximized}
+            workspacePanelRenderable={workspacePanelRenderable}
+            workspaceTogglePressed={workspaceTogglePressed}
+            workspacePanelLabel={workspacePanelRenderable ? t("rightDock.collapse") : t("rightDock.expand")}
+            onToggleSidebar={toggleSidebar}
+            onToggleWorkspacePanel={toggleWorkspacePanel}
+            onTabChange={(id) => void handleTabChange(id)}
+            onTabClose={(id) => void handleTabClose(id)}
+            onTabsClose={(ids, nextActiveTabId) => void handleTabsClose(ids, nextActiveTabId)}
+            onTabsReorder={(ids) => void handleTabsReorder(ids)}
+            onNewTab={() => void handleNewTab()}
+            onOpenPalette={() => void openPalette()}
+          />
+        )}
         <a className="skip-to-composer" href="#composer-input">
           {t("shortcuts.skipToComposer")}
         </a>
@@ -2532,6 +2537,24 @@ export default function App() {
         <section className="chat-pane">
           <>
           <header className="topicbar">
+            {workbenchChromeHidden && (
+              <Tooltip label={sidebarToggleTitle}>
+                <button
+                  className={[
+                    "topicbar__chrome-btn",
+                    sidebarExpandBlocked ? "topicbar__chrome-btn--blocked" : "",
+                    sidebarTogglePressed ? "topicbar__chrome-btn--pressed" : "",
+                  ].filter(Boolean).join(" ")}
+                  type="button"
+                  onClick={sidebarExpandBlocked ? undefined : toggleSidebar}
+                  aria-label={sidebarToggleTitle}
+                  aria-pressed={!sidebarCollapsed}
+                  aria-disabled={sidebarExpandBlocked}
+                >
+                  <PanelLeft size={15} />
+                </button>
+              </Tooltip>
+            )}
             <div className="topicbar__identity">
               <div className="topicbar__title-row">
                 {topicbarEditing ? (
@@ -2582,6 +2605,24 @@ export default function App() {
             </div>
             <div className="topicbar__spacer" />
             <div className="topicbar__actions">
+              {workbenchChromeHidden && (
+                <Tooltip label={workspacePanelRenderable ? t("rightDock.collapse") : t("rightDock.expand")}>
+                  <button
+                    className={[
+                      "topicbar__chrome-btn",
+                      "topicbar__chrome-btn--workspace",
+                      workspacePanelRenderable ? "topicbar__chrome-btn--active" : "",
+                      workspaceTogglePressed ? "topicbar__chrome-btn--pressed" : "",
+                    ].filter(Boolean).join(" ")}
+                    type="button"
+                    onClick={toggleWorkspacePanel}
+                    aria-label={workspacePanelRenderable ? t("rightDock.collapse") : t("rightDock.expand")}
+                    aria-pressed={workspacePanelRenderable}
+                  >
+                    <PanelRight size={15} />
+                  </button>
+                </Tooltip>
+              )}
               {!sidebarImDetailConnection && (
               <>
               <Tooltip label={t("topicBar.copyAll")}>
@@ -2727,18 +2768,19 @@ export default function App() {
               <ApprovalModal
                 key={state.approval.id}
                 approval={state.approval}
-                onAnswer={(allow, session, persist) => {
-                  // Approving an exit_plan_mode plan leaves plan mode; sync the
-                  // tab-local indicator and persisted safe mode immediately.
-                  if (state.approval!.tool === "exit_plan_mode" && allow) applyCollaborationMode("normal");
+                onAnswer={async (allow, session, persist) => {
+                  // Approving an exit_plan_mode plan leaves plan mode; await the
+                  // mode switch before sending the approval so the controller
+                  // observes the updated state before it unblocks.
+                  if (state.approval!.tool === "exit_plan_mode" && allow) await applyCollaborationMode("normal");
                   approve(state.approval!.id, allow, session, persist);
                 }}
                 onRevisePlan={(text) => {
                   setPendingPlanRevision(text);
                   approve(state.approval!.id, false, false, false);
                 }}
-                onExitPlan={() => {
-                  applyCollaborationMode("normal");
+                onExitPlan={async () => {
+                  await applyCollaborationMode("normal");
                   approve(state.approval!.id, false, false, false);
                 }}
                 onStop={() => {
